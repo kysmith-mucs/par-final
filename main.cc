@@ -1,5 +1,3 @@
-#include <ImageMagick-7/Magick++/Image.h>
-#include <ImageMagick-7/MagickCore/magick-type.h>
 #include <Magick++.h>
 #include <algorithm>
 #include <cmath>
@@ -37,21 +35,23 @@ main (int argc, char** argv)
   MPI_Comm_rank (MPI_COMM_WORLD, &rank);
   MPI_Comm_size (MPI_COMM_WORLD, &size);
 
-  const int WIDTH = 1024;
-  const int HEIGHT = 1024;
-  const int GRAINS_PER_PROC = 150000;
-  const int ITERATIONS = 1500;
-  const int N_MODE = 5;
-  const int M_MODE = 2;
+  const int WIDTH { 1024 };
+  const int HEIGHT { 1024 };
+  const int GRAINS_PER_PROC { 150000 };
+  const int ITERATIONS { 1500 };
+  const int N_MODE { 4 };
+  const int M_MODE { 3 };
 
-  double local_y_min = (double) rank / size;
-  double local_y_max = (double) (rank + 1) / size;
+  double local_y_min { (double) rank / size };
+  double local_y_max { (double) (rank + 1) / size };
 
   std::vector<Grain> local_grains;
   std::mt19937 gen (42 + rank);
   std::uniform_real_distribution<double> dist_x (0.0, 1.0);
   std::uniform_real_distribution<double> dist_y (local_y_min, local_y_max);
   std::uniform_real_distribution<double> step_move (-0.01, 0.01);
+
+  double start { MPI_Wtime () };
 
   for (int i = 0; i < GRAINS_PER_PROC; ++i)
   {
@@ -170,6 +170,10 @@ main (int argc, char** argv)
     image.write ("chladni_result.png");
     std::println ("Pattern generated: chladni_result.png");
   }
+
+  double end { MPI_Wtime () };
+  if (rank == 0)
+    std::println ("Time elapsed: {:.2f} Seconds", (end - start));
 
   MPI_Finalize ();
   return 0;
