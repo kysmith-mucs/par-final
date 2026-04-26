@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <iostream>
 #include <print>
 #include <random>
 #include <ranges>
@@ -41,8 +42,11 @@ struct Grain
   double x, y;
 };
 
+std::tuple<size_t, unsigned, double, double>
+retrieveInput (int ioSourceRank);
+
 double
-getAmplitude (double x, double y, int n, int m);
+getAmplitude (double x, double y, double m, double n);
 
 template<typename RandomNumberEngine>
 std::vector<Grain>
@@ -52,7 +56,9 @@ template<typename RandomNumberEngine>
 void
 performIterations (unsigned iterations,
                    std::vector<Grain>& localGrains,
-                   RandomNumberEngine& gen);
+                   RandomNumberEngine& gen,
+                   double m,
+                   double n);
 
 int
 getSectorRank (const Grain& grain, int commSize);
@@ -68,23 +74,27 @@ main ()
   MPI_Init (nullptr, nullptr);
   Magick::InitializeMagick (nullptr);
 
-  double start { MPI_Wtime () };
-
   int rank, size;
   MPI_Comm_rank (MPI_COMM_WORLD, &rank);
   MPI_Comm_size (MPI_COMM_WORLD, &size);
 
+  const int ROOT_RANK { 0 };
   const int WIDTH { 1'024 };
   const int HEIGHT { 1'024 };
-  const std::size_t GRAINS_PER_PROC { 150'000 };
-  const unsigned ITERATIONS { 1'500 };
+  auto [grainCount, iterations, m, n] = retrieveInput (ROOT_RANK);
+  const std::size_t GRAINS_PER_PROC { grainCount /
+                                      size }; // TODO proper partitioning.
+
+  MPI_Barrier (MPI_COMM_WORLD);
+
+  double lStart { MPI_Wtime () };
 
   std::random_device rd;
   std::mt19937 gen { rd () };
 
   std::vector<Grain> localGrains { populateLocalGrains (GRAINS_PER_PROC, gen) };
 
-  performIterations (ITERATIONS, localGrains, gen);
+  performIterations (iterations, localGrains, gen, m, n);
 
   std::vector<std::vector<Grain>> buckets { putGrainsInBuckets (localGrains) };
 
@@ -139,7 +149,7 @@ main ()
   }
 
   std::vector<uint32_t> global_canvas;
-  if (rank == 0)
+  if (rank == ROOT_RANK)
     global_canvas.resize (WIDTH * HEIGHT);
 
   MPI_Reduce (local_canvas.data (),
@@ -150,7 +160,7 @@ main ()
               0,
               MPI_COMM_WORLD);
 
-  if (rank == 0)
+  if (rank == ROOT_RANK)
   {
     Magick::Image image { Magick::Geometry (WIDTH, HEIGHT),
                           Magick::Color ("black") };
@@ -179,15 +189,44 @@ main ()
 
   // https://cs.millersville.edu/~gzoppetti/476/Notes/21_MatrixVectorProduct.pdf
   // slide 16 to correct timing with reduction with MPI_MAX
-  double end { MPI_Wtime () };
-  if (rank == 0)
-    std::println ("Time elapsed: {:.2f} Seconds", (end - start));
+  double lElapsed = MPI_Wtime () - lStart;
+  double elapsed;
+  MPI_Reduce (
+    &lElapsed, &elapsed, 1, MPI_DOUBLE, MPI_MAX, ROOT_RANK, MPI_COMM_WORLD);
+  if (rank == ROOT_RANK)
+    std::println ("Time elapsed: {:.2f} Seconds", elapsed);
 
   MPI_Finalize ();
 }
 
+std::tuple<size_t, unsigned, double, double>
+retrieveInput (int ioSourceRank)
+{
+  size_t grainCount;
+  unsigned iterations;
+  double m, n;
+  int myRank;
+  MPI_Comm_rank (MPI_COMM_WORLD, &myRank);
+  if (myRank == ioSourceRank)
+  {
+    std::print ("Number of grains ==> ");
+    std::cin >> grainCount;
+    std::print ("Iterations ==> ");
+    std::cin >> iterations;
+    std::print ("m ==> ");
+    std::cin >> m;
+    std::print ("n ==> ");
+    std::cin >> n;
+  }
+  MPI_Bcast (&grainCount, 1, MPI_UNSIGNED_LONG, ioSourceRank, MPI_COMM_WORLD);
+  MPI_Bcast (&iterations, 1, MPI_UNSIGNED, ioSourceRank, MPI_COMM_WORLD);
+  MPI_Bcast (&m, 1, MPI_DOUBLE, ioSourceRank, MPI_COMM_WORLD);
+  MPI_Bcast (&n, 1, MPI_DOUBLE, ioSourceRank, MPI_COMM_WORLD);
+  return { grainCount, iterations, m, n };
+}
+
 double
-getAmplitude (double x, double y, int n, int m)
+getAmplitude (double x, double y, double m, double n)
 {
   return std::abs (std::sin (n * M_PI * x) * std::sin (m * M_PI * y) -
                    std::sin (m * M_PI * x) * std::sin (n * M_PI * y));
@@ -218,10 +257,10 @@ template<typename RandomNumberEngine>
 void
 performIterations (unsigned iterations,
                    std::vector<Grain>& localGrains,
-                   RandomNumberEngine& gen)
+                   RandomNumberEngine& gen,
+                   double m,
+                   double n)
 {
-  const int N_MODE { 4 };
-  const int M_MODE { 3 };
   std::uniform_real_distribution<double> step_move (-0.01, 0.01);
 
   // Iterating over localGrains in the *outer* loop results in better locality.
@@ -230,7 +269,7 @@ performIterations (unsigned iterations,
     for ([[maybe_unused]] unsigned currentIteration :
          std::views::iota (0u, iterations))
     {
-      double amplitude = getAmplitude (g.x, g.y, N_MODE, M_MODE);
+      double amplitude = getAmplitude (g.x, g.y, m, n);
 
       g.x = std::clamp (g.x + step_move (gen) * amplitude, 0.0, 1.0);
       g.y = std::clamp (g.y + step_move (gen) * amplitude, 0.0, 1.0);
