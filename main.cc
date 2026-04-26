@@ -42,7 +42,14 @@ struct Grain
   double x, y;
 };
 
-std::tuple<size_t, unsigned, double, double>
+struct Input
+{
+  std::size_t grainCount;
+  unsigned iterations;
+  double m, n;
+};
+
+Input
 retrieveInput (int ioSourceRank);
 
 double
@@ -81,8 +88,8 @@ main ()
   const int ROOT_RANK { 0 };
   const int WIDTH { 1'024 };
   const int HEIGHT { 1'024 };
-  auto [grainCount, iterations, m, n] = retrieveInput (ROOT_RANK);
-  const std::size_t GRAINS_PER_PROC { grainCount /
+  Input in { retrieveInput (ROOT_RANK) };
+  const std::size_t GRAINS_PER_PROC { in.grainCount /
                                       size }; // TODO proper partitioning.
 
   MPI_Barrier (MPI_COMM_WORLD);
@@ -94,7 +101,7 @@ main ()
 
   std::vector<Grain> localGrains { populateLocalGrains (GRAINS_PER_PROC, gen) };
 
-  performIterations (iterations, localGrains, gen, m, n);
+  performIterations (in.iterations, localGrains, gen, in.m, in.n);
 
   std::vector<std::vector<Grain>> buckets { putGrainsInBuckets (localGrains) };
 
@@ -123,9 +130,16 @@ main ()
 
   localGrains.resize (r_displs[size - 1] + recv_counts[size - 1]);
 
+  int blocklengths[2] = { 1, 1 };
+  MPI_Datatype structTypes[2] = { MPI_DOUBLE, MPI_DOUBLE };
+
+  MPI_Aint offsets[2];
+  offsets[0] = offsetof (Grain, x);
+  offsets[1] = offsetof (Grain, y);
+
   MPI_Datatype MPI_GRAIN;
-  // I think contiguous might not be appropriate here.
-  MPI_Type_contiguous (2, MPI_DOUBLE, &MPI_GRAIN);
+
+  MPI_Type_create_struct (2, blocklengths, offsets, structTypes, &MPI_GRAIN);
   MPI_Type_commit (&MPI_GRAIN);
 
   MPI_Alltoallv (send_buf.data (),
@@ -187,8 +201,6 @@ main ()
     std::println ("Pattern generated: chladni_result.png");
   }
 
-  // https://cs.millersville.edu/~gzoppetti/476/Notes/21_MatrixVectorProduct.pdf
-  // slide 16 to correct timing with reduction with MPI_MAX
   double lElapsed = MPI_Wtime () - lStart;
   double elapsed;
   MPI_Reduce (
@@ -199,30 +211,42 @@ main ()
   MPI_Finalize ();
 }
 
-std::tuple<size_t, unsigned, double, double>
+Input
 retrieveInput (int ioSourceRank)
 {
-  size_t grainCount;
-  unsigned iterations;
-  double m, n;
+  int blocklengths[4] = { 1, 1, 1, 1 };
+  MPI_Datatype structTypes[4] = {
+    MPI_UNSIGNED_LONG, MPI_UNSIGNED, MPI_DOUBLE, MPI_DOUBLE
+  };
+
+  MPI_Aint offsets[4];
+  offsets[0] = offsetof (Input, grainCount);
+  offsets[1] = offsetof (Input, iterations);
+  offsets[2] = offsetof (Input, m);
+  offsets[3] = offsetof (Input, n);
+
+  MPI_Datatype MPI_INPUT;
+
+  MPI_Type_create_struct (4, blocklengths, offsets, structTypes, &MPI_INPUT);
+  MPI_Type_commit (&MPI_INPUT);
+
+  Input in;
   int myRank;
   MPI_Comm_rank (MPI_COMM_WORLD, &myRank);
   if (myRank == ioSourceRank)
   {
     std::print ("Number of grains ==> ");
-    std::cin >> grainCount;
+    std::cin >> in.grainCount;
     std::print ("Iterations ==> ");
-    std::cin >> iterations;
+    std::cin >> in.iterations;
     std::print ("m ==> ");
-    std::cin >> m;
+    std::cin >> in.m;
     std::print ("n ==> ");
-    std::cin >> n;
+    std::cin >> in.n;
   }
-  MPI_Bcast (&grainCount, 1, MPI_UNSIGNED_LONG, ioSourceRank, MPI_COMM_WORLD);
-  MPI_Bcast (&iterations, 1, MPI_UNSIGNED, ioSourceRank, MPI_COMM_WORLD);
-  MPI_Bcast (&m, 1, MPI_DOUBLE, ioSourceRank, MPI_COMM_WORLD);
-  MPI_Bcast (&n, 1, MPI_DOUBLE, ioSourceRank, MPI_COMM_WORLD);
-  return { grainCount, iterations, m, n };
+  MPI_Bcast (&in, 1, MPI_INPUT, ioSourceRank, MPI_COMM_WORLD);
+  MPI_Type_free (&MPI_INPUT);
+  return in;
 }
 
 double
