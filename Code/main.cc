@@ -332,9 +332,9 @@ renderImage (int root, const std::vector<Grain>& localGrains)
     for (auto v : global_canvas)
       maxVal = std::max (v, maxVal);
 
-    for (int y = 0; y < HEIGHT; ++y)
+    for (int y : std::views::iota (0, HEIGHT))
     {
-      for (int x = 0; x < WIDTH; ++x)
+      for (int x : std::views::iota (0, WIDTH))
       {
         uint32_t count { global_canvas[y * WIDTH + x] };
         if (count > 0)
