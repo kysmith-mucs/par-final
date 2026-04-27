@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstddef>
 #include <iostream>
+#include <numbers>
 #include <print>
 #include <random>
 #include <ranges>
@@ -36,6 +37,8 @@
 
 /************************************************************/
 // Function prototypes/global vars/type definitions
+
+using std::numbers::pi;
 
 struct Grain
 {
@@ -70,8 +73,11 @@ performIterations (unsigned iterations,
 int
 getSectorRank (const Grain& grain, int commSize);
 
-std::vector<std::vector<Grain>>
-putGrainsInBuckets (const std::vector<Grain>& localGrains);
+void
+exchangeGrains (std::vector<Grain>& localGrains);
+
+std::optional<Magick::Image>
+renderImage (int root, const std::vector<Grain>& localGrains);
 
 /************************************************************/
 
@@ -86,8 +92,6 @@ main ()
   MPI_Comm_size (MPI_COMM_WORLD, &size);
 
   const int ROOT_RANK { 0 };
-  const int WIDTH { 1'024 };
-  const int HEIGHT { 1'024 };
   Input in { retrieveInput (ROOT_RANK) };
   const std::size_t GRAINS_PER_PROC { in.grainCount /
                                       size }; // TODO proper partitioning.
@@ -103,110 +107,29 @@ main ()
 
   performIterations (in.iterations, localGrains, gen, in.m, in.n);
 
-  std::vector<std::vector<Grain>> buckets { putGrainsInBuckets (localGrains) };
+  exchangeGrains (localGrains);
 
-  std::vector<int> send_counts (size), recv_counts (size);
-  for (int i = 0; i < size; ++i)
-    send_counts[i] = (int) buckets[i].size ();
-
-  MPI_Alltoall (send_counts.data (),
-                1,
-                MPI_INT,
-                recv_counts.data (),
-                1,
-                MPI_INT,
-                MPI_COMM_WORLD);
-
-  std::vector<int> s_displs (size, 0), r_displs (size, 0);
-  for (int i = 1; i < size; ++i)
-  {
-    s_displs[i] = s_displs[i - 1] + send_counts[i - 1];
-    r_displs[i] = r_displs[i - 1] + recv_counts[i - 1];
-  }
-
-  std::vector<Grain> send_buf;
-  for (auto& b : buckets)
-    send_buf.insert (send_buf.end (), b.begin (), b.end ());
-
-  localGrains.resize (r_displs[size - 1] + recv_counts[size - 1]);
-
-  int blocklengths[2] = { 1, 1 };
-  MPI_Datatype structTypes[2] = { MPI_DOUBLE, MPI_DOUBLE };
-
-  MPI_Aint offsets[2];
-  offsets[0] = offsetof (Grain, x);
-  offsets[1] = offsetof (Grain, y);
-
-  MPI_Datatype MPI_GRAIN;
-
-  MPI_Type_create_struct (2, blocklengths, offsets, structTypes, &MPI_GRAIN);
-  MPI_Type_commit (&MPI_GRAIN);
-
-  MPI_Alltoallv (send_buf.data (),
-                 send_counts.data (),
-                 s_displs.data (),
-                 MPI_GRAIN,
-                 localGrains.data (),
-                 recv_counts.data (),
-                 r_displs.data (),
-                 MPI_GRAIN,
-                 MPI_COMM_WORLD);
-
-  MPI_Type_free (&MPI_GRAIN);
-
-  std::vector<uint32_t> local_canvas (WIDTH * HEIGHT, 0);
-  for (const auto& g : localGrains)
-  {
-    int px = std::clamp ((int) (g.x * WIDTH), 0, WIDTH - 1);
-    int py = std::clamp ((int) (g.y * HEIGHT), 0, HEIGHT - 1);
-    local_canvas[py * WIDTH + px]++;
-  }
-
-  std::vector<uint32_t> global_canvas;
-  if (rank == ROOT_RANK)
-    global_canvas.resize (WIDTH * HEIGHT);
-
-  MPI_Reduce (local_canvas.data (),
-              global_canvas.data (),
-              WIDTH * HEIGHT,
-              MPI_UINT32_T,
-              MPI_SUM,
-              0,
-              MPI_COMM_WORLD);
-
-  if (rank == ROOT_RANK)
-  {
-    Magick::Image image { Magick::Geometry (WIDTH, HEIGHT),
-                          Magick::Color ("black") };
-
-    uint32_t max_val = 0;
-    for (auto v : global_canvas)
-      if (v > max_val)
-        max_val = v;
-
-    for (int y = 0; y < HEIGHT; ++y)
-    {
-      for (int x = 0; x < WIDTH; ++x)
-      {
-        uint32_t count = global_canvas[y * WIDTH + x];
-        if (count > 0)
-        {
-          double factor = std::log1p (count) / std::log1p (max_val);
-          Magick::Quantum q = factor * 65'535.0;
-          image.pixelColor (x, y, Magick::Color (q, q, q));
-        }
-      }
-    }
-    image.write ("chladni_result.png");
-    std::println ("Pattern generated: chladni_result.png");
-  }
+  auto optionalImage { renderImage (ROOT_RANK, localGrains) };
 
   double lElapsed = MPI_Wtime () - lStart;
   double elapsed;
   MPI_Reduce (
     &lElapsed, &elapsed, 1, MPI_DOUBLE, MPI_MAX, ROOT_RANK, MPI_COMM_WORLD);
+
   if (rank == ROOT_RANK)
+  {
+    if (optionalImage)
+    {
+      Magick::Image image { *optionalImage };
+      image.write ("chladni_result.png");
+      std::println ("Pattern generated: chladni_result.png");
+    }
+    else
+    {
+      std::println ("The root process did not receive an image!");
+    }
     std::println ("Time elapsed: {:.2f} Seconds", elapsed);
+  }
 
   MPI_Finalize ();
 }
@@ -252,8 +175,8 @@ retrieveInput (int ioSourceRank)
 double
 getAmplitude (double x, double y, double m, double n)
 {
-  return std::abs (std::sin (n * M_PI * x) * std::sin (m * M_PI * y) -
-                   std::sin (m * M_PI * x) * std::sin (n * M_PI * y));
+  return std::abs (std::sin (n * pi * x) * std::sin (m * pi * y) -
+                   std::sin (m * pi * x) * std::sin (n * pi * y));
 }
 
 template<typename RandomNumberEngine>
@@ -307,15 +230,122 @@ getSectorRank (const Grain& grain, int commSize)
   return std::clamp ((int) (grain.y * commSize), 0, commSize - 1);
 }
 
-std::vector<std::vector<Grain>>
-putGrainsInBuckets (const std::vector<Grain>& localGrains)
+void
+exchangeGrains (std::vector<Grain>& localGrains)
 {
-  int size;
+  int rank, size;
+  MPI_Comm_rank (MPI_COMM_WORLD, &rank);
   MPI_Comm_size (MPI_COMM_WORLD, &size);
+
   std::vector<std::vector<Grain>> buckets (size);
   for (Grain g : localGrains)
   {
     buckets[getSectorRank (g, size)].push_back (g);
   }
-  return buckets;
+
+  std::vector<int> sendCounts (size), recvCounts (size);
+  for (int i : std::views::iota (0, size))
+  {
+    sendCounts[i] = (int) buckets[i].size ();
+  }
+
+  MPI_Alltoall (sendCounts.data (),
+                1,
+                MPI_INT,
+                recvCounts.data (),
+                1,
+                MPI_INT,
+                MPI_COMM_WORLD);
+
+  std::vector<int> sendDisplacements (size, 0), recvDisplacements (size, 0);
+  for (int i = 1; i < size; ++i)
+  {
+    sendDisplacements[i] = sendDisplacements[i - 1] + sendCounts[i - 1];
+    recvDisplacements[i] = recvDisplacements[i - 1] + recvCounts[i - 1];
+  }
+
+  std::vector<Grain> sendBuffer;
+  for (auto& b : buckets)
+  {
+    sendBuffer.insert (sendBuffer.end (), b.begin (), b.end ());
+  }
+
+  localGrains.resize (recvDisplacements[size - 1] + recvCounts[size - 1]);
+
+  int blocklengths[2] { 1, 1 };
+  MPI_Datatype structTypes[2] { MPI_DOUBLE, MPI_DOUBLE };
+  MPI_Aint offsets[2] { offsetof (Grain, x), offsetof (Grain, y) };
+  MPI_Datatype MPI_GRAIN;
+
+  MPI_Type_create_struct (2, blocklengths, offsets, structTypes, &MPI_GRAIN);
+  MPI_Type_commit (&MPI_GRAIN);
+
+  MPI_Alltoallv (sendBuffer.data (),
+                 sendCounts.data (),
+                 sendDisplacements.data (),
+                 MPI_GRAIN,
+                 localGrains.data (),
+                 recvCounts.data (),
+                 recvDisplacements.data (),
+                 MPI_GRAIN,
+                 MPI_COMM_WORLD);
+
+  MPI_Type_free (&MPI_GRAIN);
+}
+
+std::optional<Magick::Image>
+renderImage (int root, const std::vector<Grain>& localGrains)
+{
+  int rank, size;
+  MPI_Comm_rank (MPI_COMM_WORLD, &rank);
+  MPI_Comm_size (MPI_COMM_WORLD, &size);
+  const int WIDTH { 1'024 };
+  const int HEIGHT { 1'024 };
+  std::vector<uint32_t> local_canvas (WIDTH * HEIGHT, 0);
+  for (const auto& g : localGrains)
+  {
+    int px { std::clamp ((int) (g.x * WIDTH), 0, WIDTH - 1) };
+    int py { std::clamp ((int) (g.y * HEIGHT), 0, HEIGHT - 1) };
+    ++local_canvas[py * WIDTH + px];
+  }
+
+  std::vector<uint32_t> global_canvas;
+  if (rank == root)
+  {
+    global_canvas.resize (WIDTH * HEIGHT);
+  }
+
+  MPI_Reduce (local_canvas.data (),
+              global_canvas.data (),
+              WIDTH * HEIGHT,
+              MPI_UINT32_T,
+              MPI_SUM,
+              0,
+              MPI_COMM_WORLD);
+
+  if (rank == root)
+  {
+    Magick::Image image { Magick::Geometry (WIDTH, HEIGHT),
+                          Magick::Color ("black") };
+
+    uint32_t maxVal {};
+    for (auto v : global_canvas)
+      maxVal = std::max (v, maxVal);
+
+    for (int y = 0; y < HEIGHT; ++y)
+    {
+      for (int x = 0; x < WIDTH; ++x)
+      {
+        uint32_t count { global_canvas[y * WIDTH + x] };
+        if (count > 0)
+        {
+          double factor = std::log1p (count) / std::log1p (maxVal);
+          Magick::Quantum q { (float) (factor * 65'535.0) };
+          image.pixelColor (x, y, Magick::Color (q, q, q));
+        }
+      }
+    }
+    return image;
+  }
+  return {};
 }
