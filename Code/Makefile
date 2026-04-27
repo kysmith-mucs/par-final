@@ -4,7 +4,7 @@ CXX      := mpicxx
 CXXFLAGS := -DOMPI_SKIP_MPICXX -std=c++23 -O3 -Wall -Wextra -Werror $(shell pkg-config --cflags $(PKG_NAME))
 LDFLAGS  := $(shell pkg-config --libs $(PKG_NAME)) -lpthread
 
-TARGET   := main
+TARGET   := main.out
 SRCS     := main.cc
 #HDRS     := ThreadSafeQueue.hpp
 OBJS     := $(SRCS:.cc=.o)
